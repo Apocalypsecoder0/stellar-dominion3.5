@@ -3,20 +3,19 @@ import { config } from "dotenv";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as net from "node:net";
-import { existsSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs";
 
 const currentFilePath = fileURLToPath(import.meta.url);
 const currentDir = dirname(currentFilePath);
 const projectRoot = resolve(currentDir, "..");
 
+// Load env files in order of precedence (first wins for a given key).
+config({ path: resolve(projectRoot, ".env.development.local") });
+config({ path: resolve(projectRoot, ".env.local") });
 config({ path: resolve(projectRoot, ".env") });
 config();
 
 const preferredPort = Number.parseInt(process.env.PORT || "5000", 10);
 const basePort = Number.isFinite(preferredPort) && preferredPort > 0 ? preferredPort : 5000;
-
-const pgDataDir = resolve(projectRoot, ".postgres_data");
-const pgLogFile = resolve(pgDataDir, "server.log");
 
 function isPortFree(port: number): Promise<boolean> {
   return new Promise((resolvePort) => {
@@ -26,120 +25,6 @@ function isPortFree(port: number): Promise<boolean> {
       server.close(() => resolvePort(true));
     });
     server.listen(port, "0.0.0.0");
-  });
-}
-
-async function isPgReady(port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const check = spawn("pg_isready", ["-h", "localhost", "-p", String(port)], { stdio: "ignore" });
-    check.on("exit", (code) => resolve(code === 0));
-  });
-}
-
-function ensurePgLockDirectory(): void {
-  // PostgreSQL needs /run/postgresql for its lock file
-  const lockDir = "/run/postgresql";
-  try {
-    if (!existsSync(lockDir)) {
-      console.log(`🔧 Creating PostgreSQL lock directory: ${lockDir}`);
-      mkdirSync(lockDir, { recursive: true, mode: 0o777 });
-    }
-    // Clean up stale lock files that may prevent startup
-    const stalePid = resolve(pgDataDir, "postmaster.pid");
-    const staleSocket = resolve(lockDir, ".s.PGSQL.15432.lock");
-    for (const f of [stalePid, staleSocket]) {
-      if (existsSync(f)) {
-        try {
-          unlinkSync(f);
-        } catch (_) {
-          /* ignore */ }
-      }
-    }
-  } catch (e) {
-    console.warn(`⚠️  Could not prepare lock directory: ${e}`);
-  }
-}
-
-async function startLocalPostgres(): Promise<void> {
-  const pgReady = await isPgReady(15432);
-  if (pgReady) {
-    console.log("✅ Local PostgreSQL already running on port 15432");
-    return;
-  }
-
-  ensurePgLockDirectory();
-
-  if (!existsSync(pgDataDir)) {
-    console.log("🔧 Initializing PostgreSQL data directory...");
-    const init = spawn("pg_ctl", ["init", "-D", pgDataDir], { stdio: "inherit" });
-    await new Promise((resolve, reject) => {
-      init.on("exit", (code) => (code === 0 ? resolve(undefined) : reject(new Error(`pg_ctl init failed: ${code}`))));
-    });
-
-    const pgConf = resolve(pgDataDir, "postgresql.conf");
-    const pgHba = resolve(pgDataDir, "pg_hba.conf");
-    writeFileSync(pgConf, "listen_addresses = 'localhost'\nport = 15432\nmax_connections = 20\nshared_buffers = 64MB\n");
-    writeFileSync(pgHba, "local   all             all                                     trust\nhost    all             all             127.0.0.1/32            trust\nhost    all             all             ::1/128                 trust\n");
-  }
-
-  console.log("🚀 Starting local PostgreSQL on port 15432...");
-  const pgStart = spawn("pg_ctl", ["start", "-D", pgDataDir, "-l", pgLogFile], {
-    stdio: "inherit",
-    detached: true,
-  });
-
-  await new Promise((resolve, reject) => {
-    pgStart.on("exit", (code) => {
-      if (code === 0) {
-        console.log("✅ PostgreSQL started successfully");
-        resolve(undefined);
-      } else {
-        reject(new Error(`pg_ctl start failed: ${code}`));
-      }
-    });
-  });
-
-  // Wait for PostgreSQL to be ready
-  for (let i = 0; i < 15; i++) {
-    const ready = await isPgReady(15432);
-    if (ready) {
-      console.log("✅ PostgreSQL is ready");
-      return;
-    }
-    await new Promise((r) => setTimeout(r, 500));
-  }
-
-  throw new Error("PostgreSQL did not become ready in time");
-}
-
-async function createDatabaseIfNeeded(): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const check = spawn("psql", ["-h", "localhost", "-p", "15432", "-U", process.env.USER || process.env.USERNAME || "runner", "-d", "postgres", "-c", "SELECT 1 FROM pg_database WHERE datname = 'stellar_dominion';"], {
-      stdio: ["ignore", "pipe", "pipe"],
-      shell: false,
-    });
-    let output = "";
-    check.stdout?.on("data", (d) => (output += d));
-    check.stderr?.on("data", (d) => (output += d));
-    check.on("exit", () => {
-      if (output.includes("1 row") || output.includes("(1 row)")) {
-        console.log("✅ Database stellar_dominion exists");
-        resolve();
-        return;
-      }
-      console.log("🔧 Creating database stellar_dominion...");
-      const create = spawn("psql", ["-h", "localhost", "-p", "15432", "-U", process.env.USER || process.env.USERNAME || "runner", "-d", "postgres", "-c", "CREATE DATABASE stellar_dominion;"], {
-        stdio: "inherit",
-      });
-      create.on("exit", (code) => {
-        if (code === 0) {
-          console.log("✅ Database stellar_dominion created");
-          resolve();
-        } else {
-          reject(new Error("Failed to create database"));
-        }
-      });
-    });
   });
 }
 
@@ -153,13 +38,10 @@ async function findAvailablePort(startPort: number, maxChecks = 25): Promise<num
 }
 
 async function startDev() {
-  // Start local PostgreSQL if DATABASE_URL points to Neon or not set
-  const dbUrl = process.env.DATABASE_URL || "";
-  if (!dbUrl || dbUrl.includes("neon.tech")) {
-    await startLocalPostgres();
-    await createDatabaseIfNeeded();
-    const pgUser = process.env.USER || process.env.USERNAME || "runner";
-process.env.DATABASE_URL = `postgresql://${pgUser}@localhost:15432/stellar_dominion`;
+  if (!process.env.DATABASE_URL) {
+    console.warn("⚠️  DATABASE_URL is not set. Database operations will fail until it is configured.");
+  } else {
+    console.log("🔌 Using DATABASE_URL from environment");
   }
 
   const selectedPort = await findAvailablePort(basePort);

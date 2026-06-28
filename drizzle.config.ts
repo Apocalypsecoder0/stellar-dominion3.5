@@ -1,10 +1,17 @@
+import { config } from "dotenv";
+import { resolve } from "node:path";
 import { defineConfig } from "drizzle-kit";
 
-const envUrl = process.env.DATABASE_URL || "";
-// Use local database if Neon URL is broken/expired (contains neon.tech)
-const dbUrl = envUrl.includes("neon.tech") || !envUrl
-  ? "postgresql://runner@localhost:15432/stellar_dominion"
-  : envUrl;
+const projectRoot = process.cwd();
+config({ path: resolve(projectRoot, ".env.development.local") });
+config({ path: resolve(projectRoot, ".env.local") });
+config({ path: resolve(projectRoot, ".env") });
+config();
+
+const dbUrl = process.env.DATABASE_URL;
+if (!dbUrl) {
+  throw new Error("DATABASE_URL is not set. Add it to your environment before running drizzle-kit.");
+}
 
 export default defineConfig({
   out: "./migrations",
