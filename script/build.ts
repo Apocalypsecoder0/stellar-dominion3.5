@@ -65,6 +65,15 @@ async function buildAll() {
     outfile: path.join(distDir, "index.cjs"),
     define: {
       "process.env.NODE_ENV": '"production"',
+      // `import.meta` is empty in the CJS output format. Map the fields the
+      // source code relies on to their CommonJS equivalents so the bundle
+      // works at runtime (see banner below for `import_meta_url`).
+      "import.meta.url": "import_meta_url",
+      "import.meta.dirname": "__dirname",
+      "import.meta.filename": "__filename",
+    },
+    banner: {
+      js: "const import_meta_url = require('url').pathToFileURL(__filename).href;",
     },
     minify: true,
     external: externals,
